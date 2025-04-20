@@ -34,7 +34,7 @@ All benchmarks run on:
 - **Driver Version:** 566.36
 - **Architecture:** Turing
 - **Precision:** FP32,FP16,INT8 
-- **Matrix size:** M = 512, K = 256, N = 126  
+- **Matrix size:** M = 8192, K = 1024, N = 4096  
 - **Iterations:** 20 runs (after 3 warmup rus) 
 - **Timing:** Wall-clock using `clock_gettime(CLOCK_MONOTONIC)`
 
