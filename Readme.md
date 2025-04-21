@@ -38,13 +38,13 @@ All benchmarks run on:
 - **Iterations:** 20 runs (after 3 warmup rus) 
 - **Timing:** Wall-clock using `clock_gettime(CLOCK_MONOTONIC)`
 
-| Kernel Version        | Avg. Execution Time (ms) |
-|-----------------------|--------------------------|
-| CPU (Reference)       | 57115.670 (57 sec💀)     |
-| Naive CUDA Kernel     | 120.713 😃               |
-| Tiled Shared Kernel   | 78.532 🤩                |
-| CublasLt FP32         | 79.177 🤩                |
-
+| Kernel Version        | Avg. Execution Time (ms)      |
+|-----------------------|-------------------------------|
+| CPU (Reference)       | 57115.670 (57 sec💀)          |
+| Naive CUDA Kernel     | 110.380 😃                    |
+| Tiled Shared Kernel   | 63.543 🤩(tile 32),           |
+| CublasLt FP32         | 9.487 🚀                      |
+| CublasLt FP16         | 1.356 🚀                      |
 
 
 ---

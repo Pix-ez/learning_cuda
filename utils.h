@@ -9,7 +9,9 @@
 #include <cuda_fp16.h>
 #include <vector>
 #include <iomanip>
-
+#include <iomanip>
+#include <functional>
+#include <numeric>
 
 
 // Function to measure execution time
@@ -80,13 +82,55 @@ void compare_results(float *A, float *B, int rows, int cols){
 
 
 // Assuming you can modify the function definition:
-bool verifyResults(const float* arr1, const float* arr2, float tolerance, int size) {
-    for (int i = 0; i < size; i++) {
-        if (std::abs(arr1[i] - arr2[i]) > tolerance) {
+bool verifyResults(const float* actual, const float* expected, float tolerance, int size) {
+    for (int i = 0; i < size; ++i) {
+        float rel_error = std::abs(expected[i] - actual[i]);
+        if (rel_error > tolerance) {
+            std::cout << "Mismatch at index " << i << ": expected " << expected[i] 
+                      << ", got " << actual[i] << ", relative error: " << rel_error << std::endl;
             return false;
         }
     }
     return true;
 }
 
+// New function for CUDA event-based timing
+float time_kernel(std::function<void()> kernel_func) {
+    cudaEvent_t start, stop;
+    float elapsed_time;
 
+    CHECK_CUDA(cudaEventCreate(&start));
+    CHECK_CUDA(cudaEventCreate(&stop));
+
+    CHECK_CUDA(cudaEventRecord(start));
+    kernel_func();
+    CHECK_CUDA(cudaDeviceSynchronize());
+    CHECK_CUDA(cudaEventRecord(stop));
+    CHECK_CUDA(cudaEventSynchronize(stop));
+
+    CHECK_CUDA(cudaEventElapsedTime(&elapsed_time, start, stop));
+
+    CHECK_CUDA(cudaEventDestroy(start));
+    CHECK_CUDA(cudaEventDestroy(stop));
+
+    return elapsed_time;
+}
+
+// Function to perform warmup and benchmark runs
+float benchmark_kernel(std::function<void()> kernel_func, int warmup_runs, int benchmark_runs) {
+    // Warmup runs
+    for (int i = 0; i < warmup_runs; ++i) {
+        kernel_func();
+    }
+    
+    // Benchmark runs
+    std::vector<float> times;
+    for (int i = 0; i < benchmark_runs; ++i) {
+        float time = time_kernel(kernel_func);
+        times.push_back(time);
+    }
+    
+    // Calculate average time
+    float avg_time = std::accumulate(times.begin(), times.end(), 0.0f) / benchmark_runs;
+    return avg_time;
+}
