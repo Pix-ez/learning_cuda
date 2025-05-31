@@ -2,8 +2,13 @@
 #include "config.h"
 
 __global__ void naiveMatrixMultiply(float *A, float *B, float *C, int M, int N, int K){
+    
+    // no coalesced memory
     int row = blockIdx.y* blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    
+    // no coalesced memory
 
     if (row < M && col < N) {
         float sum =0.0f;
@@ -14,6 +19,28 @@ __global__ void naiveMatrixMultiply(float *A, float *B, float *C, int M, int N, 
     }
 }
 
+
+//GEMEM coalesed 
+// template <const uint BLOCKSIZE>
+//for now just hardcode 16 blocksize
+#define BLOCKSIZE 16
+__global__ void gememMatrixMultiply(float *A, float *B, float *C, int M, int N, int K){
+    
+    // no coalesced memory
+    int row = blockIdx.x * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
+    int col = blockIdx.y * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
+
+    
+    // no coalesced memory
+
+    if (row < M && col < N) {
+        float sum =0.0f;
+        for (int i=0 ; i<K; ++i){
+            sum += A[row*K +i] * B[i*N +col];
+        }
+        C[row*N + col] = sum;
+    }
+}
 //Tiled kernel for fast memory access result in fast compute rather than waiting for access element from global mem.
 __global__ void tiledMatrixMultiply(float *A, float *B, float *C, int M, int N, int K){
     //first load chunk of data into faster cache which is fast rather than going for every element to main memory called memory coalescing
@@ -21,10 +48,12 @@ __global__ void tiledMatrixMultiply(float *A, float *B, float *C, int M, int N, 
     __shared__ float sharedB[TILE_SIZE][TILE_SIZE]; 
 
     int bx = blockIdx.x, by = blockIdx.y;
-    int tx = threadIdx.x, ty = threadIdx.y;
+    int tx = threadIdx.x, ty = threadIdx.y; 
 
     int row = by * TILE_SIZE + ty;
     int col = bx * TILE_SIZE + tx;
+
+   
 
     float sum = 0.0f;
 

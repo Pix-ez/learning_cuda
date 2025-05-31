@@ -7,7 +7,7 @@
 // Kernel declaration
 __global__ void naiveMatrixMultiply(float *A, float *B, float *C, int M, int N, int K);
 __global__ void tiledMatrixMultiply(float *A, float *B, float *C, int M, int N, int K);
-
+__global__ void gememMatrixMultiply(float *A, float *B, float *C, int M, int N, int K);
 int main(){
 
     //Matrix: C = A x B --> [M x K] * [K * N] = [M x N]
@@ -61,6 +61,22 @@ int main(){
         naiveMatrixMultiply<<<default_gridDim, default_blockDim>>>(d_A, d_B, d_C, M, N, K);
     }, warmup_runs, benchmark_runs);
     std::cout << "Naive CUDA kernel average time: " << naive_kernel << " ms" << std::endl;
+
+    cudaMemcpy(h_C_naive, d_C, size_C, cudaMemcpyDeviceToHost);
+
+
+//############################################## GEMEM MM ##############################################
+
+    // std::cout << h_A[1] << "\t"<< h_A[10] <<std::endl;
+
+    // dim3 default_blockDim(16, 16);
+    // dim3 default_gridDim((N + default_blockDim.x - 1) / default_blockDim.x,
+    //                      (M + default_blockDim.y - 1) / default_blockDim.y);
+
+    float gemem_kernel = benchmark_kernel([&]() {
+        gememMatrixMultiply<<<default_gridDim, default_blockDim>>>(d_A, d_B, d_C, M, N, K);
+    }, warmup_runs, benchmark_runs);
+    std::cout << "Gemem coalsed CUDA kernel average time: " << naive_kernel << " ms" << std::endl;
 
     cudaMemcpy(h_C_naive, d_C, size_C, cudaMemcpyDeviceToHost);
 
@@ -258,6 +274,176 @@ int main(){
 
     free(h_C_cublaslt_fp16);
     cudaFree(d_A_fp16);cudaFree(d_B_fp16);cudaFree(d_C_fp16);
+
+//######################### CUBLASTLT Tensor FP32 #################################################
+   
+    // Allocate device memory
+    float *h_C_cublaslt_tensor_fp32 = (float*)malloc(size_C);
+    float *d_A_tensor_fp32, *d_B_tensor_fp32, *d_C_tensor_fp32;
+    CHECK_CUDA(cudaMalloc(&d_A_tensor_fp32, size_A));
+    CHECK_CUDA(cudaMalloc(&d_B_tensor_fp32, size_B));
+    CHECK_CUDA(cudaMalloc(&d_C_tensor_fp32, size_C));
+
+    // Copy inputs
+    CHECK_CUDA(cudaMemcpy(d_A_tensor_fp32, h_A, size_A, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_B_tensor_fp32, h_B, size_B, cudaMemcpyHostToDevice));
+ 
+
+    cudaDeviceProp deviceProp;
+    int deviceId;
+    cudaGetDevice(&deviceId);
+    cudaGetDeviceProperties(&deviceProp, deviceId);
+
+    // Create cuBLASLt handle
+    cublasLtHandle_t ltHandle;
+    CHECK_CUBLAS(cublasLtCreate(&ltHandle));
+    
+
+    
+
+    // Create operation descriptor
+    cublasLtMatmulDesc_t operationDesc;
+    CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, CUBLAS_COMPUTE_32F_FAST_TF32, CUDA_R_32F));
+
+    // Set transposition (no transpose A and B)
+    cublasOperation_t transA = CUBLAS_OP_T;
+    cublasOperation_t transB = CUBLAS_OP_T;
+    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(transA)));
+    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(transB)));
+
+    // Create matrix layouts - CRITICAL: Adjust leading dimensions for transposed matrices
+    cublasLtMatrixLayout_t Adesc, Bdesc, Cdesc;
+    // For transposed A (CUBLAS_OP_T): rows=K, cols=M, leading dimension=K
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_32F, K, M, K));
+    // For transposed B (CUBLAS_OP_T): rows=N, cols=K, leading dimension=N
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_32F, N, K, N));
+    // Result C: rows=M, cols=N, leading dimension=M
+    CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_32F, M, N, M));
+
+    // Set alpha and beta
+    // float alpha = 1.0f;
+    // float beta = 0.0f;
+
+    // Allocate workspace
+    void *d_workspace = nullptr;
+    size_t workspaceSize = 32 * 1024 * 1024; // 4MB
+    CHECK_CUDA(cudaMalloc(&d_workspace, workspaceSize));
+
+    // Create preference object
+    cublasLtMatmulPreference_t preference;
+    CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&preference));
+    CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(preference,
+                CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                &workspaceSize, sizeof(workspaceSize)));
+
+
+    // Force Tensor Core algorithm selection
+    int algoMode = 1;  // Tensor Core algorithms only
+    CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
+                preference,
+                CUBLASLT_MATMUL_PREF_SEARCH_MODE,
+                &algoMode, sizeof(algoMode)));
+
+    // Create operation descriptor with explicit TF32 computation
+
+    CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, CUBLAS_COMPUTE_32F_FAST_TF32, CUDA_R_32F));
+    // Set bias operation to no-op if not needed
+    cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_DEFAULT;
+    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+                operationDesc,
+                CUBLASLT_MATMUL_DESC_EPILOGUE,
+                &epilogue, sizeof(epilogue)));
+
+
+    // Find the best heuristic algo
+    // Request multiple algorithm options and select best performing
+    const int REQUEST_ALGO_COUNT = 10;  // Request more algorithm options
+    cublasLtMatmulHeuristicResult_t heuristicResults[REQUEST_ALGO_COUNT];
+    int returnedResults = 0;
+    CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
+        ltHandle,
+        operationDesc,
+        Adesc,
+        Bdesc,
+        Cdesc,
+        Cdesc,
+        preference,
+        REQUEST_ALGO_COUNT,
+        heuristicResults,
+        &returnedResults
+    ));
+
+
+    // Validate results
+    std::cout << "Number of algorithms found: " << returnedResults << std::endl;
+
+    // Select highest performing algorithm (lowest compute time expected)
+    int selectedAlgo = 0;
+    if (returnedResults > 0) {
+        for (int i = 0; i < returnedResults; i++) {
+            if (heuristicResults[i].state == CUBLAS_STATUS_SUCCESS) {
+                std::cout << "Algo " << i << " - wavesCount: " << heuristicResults[i].wavesCount;
+                std::cout << ", workspaceSize: " << heuristicResults[i].workspaceSize << std::endl;
+                selectedAlgo = i;  // Can implement more sophisticated selection criteria
+            }
+        }
+    } else {
+        std::cerr << "No valid algorithms found!" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    // Ensure synchronization before timing
+    cudaDeviceSynchronize();
+
+    // Launch
+    float cublaslt_tensor_f32_time = benchmark_kernel([&]() {
+        CHECK_CUBLAS(cublasLtMatmul(ltHandle,
+            operationDesc,
+            &alpha,
+            d_A_tensor_fp32, Adesc,
+            d_B_tensor_fp32, Bdesc,
+            &beta,
+            d_C_tensor_fp32, Cdesc,
+            d_C_tensor_fp32, Cdesc,
+            &heuristicResults[selectedAlgo].algo,
+            d_workspace, workspaceSize,
+            0));  // default stream
+    // Force synchronization within benchmark loop
+    cudaDeviceSynchronize();
+    }, warmup_runs, benchmark_runs);
+
+    
+
+    std::cout << "cuBLASLt Tensor FP32 (Tensor Core) avg time: " << cublaslt_tensor_f32_time << " ms" << std::endl;
+
+    // Cleanup
+    CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(preference));
+    CHECK_CUDA(cudaFree(d_workspace));
+    CHECK_CUBLAS(cublasLtDestroy(ltHandle));
+
+    // float cublaslt_tensor_f32_time = benchmark_kernel([&]() {
+    //     CHECK_CUBLAS(cublasLtMatmul(ltHandle,
+    //         operationDesc,
+    //         &alpha,
+    //         d_A_tensor_fp32, Adesc,
+    //         d_B_tensor_fp32, Bdesc,
+    //         &beta,
+    //         d_C_tensor_fp32, Cdesc,
+    //         d_C_tensor_fp32, Cdesc,
+    //         nullptr, nullptr, 0, 0););
+
+    // }, warmup_runs, benchmark_runs);
+    // std::cout << "CublasLt Tensor FP32 kernel average time: " << cublaslt_tensor_f32_time << " ms" << std::endl;
+
+
+    cudaMemcpy(h_C_cublaslt_tensor_fp32, d_C_tensor_fp32, size_C, cudaMemcpyDeviceToHost);
+
+    bool cublas_tensor_fp32_correct = verifyResults(h_C_naive, h_C_cublaslt_tensor_fp32, 1e-2, size_C);
+    std::cout << "cuBLAS Tensor FP32 results " << (cublas_tensor_fp32_correct ? "match" : "do not match") << " the naive kernel results within tolerance of 1e-2." << std::endl;
+
+    free(h_C_cublaslt_tensor_fp32);
+    cudaFree(d_A_tensor_fp32);cudaFree(d_B_tensor_fp32);cudaFree(d_C_tensor_fp32);
+
 
 
     // Free memory
